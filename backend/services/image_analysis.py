@@ -1,81 +1,36 @@
 from __future__ import annotations
 
-import base64
 import json
-import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+import easyocr
+import numpy as np
+from PIL import Image
+from io import BytesIO
+
 from services.sentiment_analysis import SentimentConfig, analyze_sentiment
+
+
+# Initialize OCR reader (lazy loaded on first use)
+_ocr_reader = None
+
+
+def _get_ocr_reader():
+    """Lazy load OCR reader to avoid initialization overhead."""
+    global _ocr_reader
+    if _ocr_reader is None:
+        _ocr_reader = easyocr.Reader(["en"], gpu=False)
+    return _ocr_reader
 
 
 @dataclass
 class ImageAnalysisConfig:
     ollama_host: str = "http://127.0.0.1:11434"
-    vision_model: str = "llava"
     text_model: str = "llama3"
     timeout_seconds: int = 120
-
-
-def _normalize_model_name(model_name: str) -> str:
-    return model_name.split(":", 1)[0].strip().lower()
-
-
-def _list_ollama_models(host: str, timeout_seconds: int) -> list[str]:
-    req = urllib.request.Request(
-        f"{host.rstrip('/')}/api/tags",
-        method="GET",
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_seconds) as response:
-            raw = response.read().decode("utf-8")
-            parsed = json.loads(raw)
-    except Exception:
-        return []
-
-    models = parsed.get("models", [])
-    names: list[str] = []
-    for item in models:
-        name = str(item.get("name", "")).strip()
-        if name:
-            names.append(name)
-    return names
-
-
-def _is_vision_model_name(name: str) -> bool:
-    lower = _normalize_model_name(name)
-    return bool(re.search(r"vision|llava|moondream|bakllava|minicpm", lower))
-
-
-def _select_vision_model(config: ImageAnalysisConfig) -> str:
-    installed = _list_ollama_models(config.ollama_host, timeout_seconds=max(8, config.timeout_seconds // 3))
-    if not installed:
-        # Fallback to configured model if tags endpoint is unavailable.
-        return config.vision_model
-
-    normalized_map = {_normalize_model_name(name): name for name in installed}
-
-    preferred = _normalize_model_name(config.vision_model)
-    if preferred in normalized_map:
-        return normalized_map[preferred]
-
-    for candidate in ["llava", "llama3.2-vision", "moondream", "bakllava"]:
-        if candidate in normalized_map:
-            return normalized_map[candidate]
-
-    for name in installed:
-        if _is_vision_model_name(name):
-            return name
-
-    installed_list = ", ".join(installed)
-    raise RuntimeError(
-        "No vision model found in Ollama. Image analysis needs a vision-capable model. "
-        "Run one of: `ollama pull llava` or `ollama pull llama3.2-vision`. "
-        f"Installed models: [{installed_list}]"
-    )
 
 
 def _ollama_generate(
@@ -83,15 +38,12 @@ def _ollama_generate(
     model: str,
     prompt: str,
     timeout_seconds: int,
-    images: list[str] | None = None,
 ) -> str:
     payload: dict[str, Any] = {
         "model": model,
         "prompt": prompt,
         "stream": False,
     }
-    if images:
-        payload["images"] = images
 
     req = urllib.request.Request(
         f"{host.rstrip('/')}/api/generate",
@@ -123,24 +75,23 @@ def _ollama_generate(
 
 
 def _extract_text_from_image(image_bytes: bytes, config: ImageAnalysisConfig) -> str:
-    encoded = base64.b64encode(image_bytes).decode("utf-8")
-    vision_model = _select_vision_model(config)
+    """Extract text from image using EasyOCR (pure Python, no external binaries needed)."""
+    try:
+        image = Image.open(BytesIO(image_bytes))
+        image = image.convert("RGB")
+        
+        # Convert PIL Image to numpy array for EasyOCR
+        image_array = np.array(image)
+        
+        reader = _get_ocr_reader()
+        results = reader.readtext(image_array)
+        
+        # Combine all detected text
+        extracted = "\n".join([text for (_, text, _) in results])
+        return extracted.strip()
+    except Exception as e:
+        raise RuntimeError(f"Failed to extract text from image using OCR: {str(e)}") from e
 
-    prompt = (
-        "Extract all visible text from this image. "
-        "Return plain readable text only. "
-        "Do not add explanations."
-    )
-
-    extracted = _ollama_generate(
-        host=config.ollama_host,
-        model=vision_model,
-        prompt=prompt,
-        timeout_seconds=config.timeout_seconds,
-        images=[encoded],
-    )
-
-    return extracted.strip()
 
 
 def _human_friendly_summary(extracted_text: str, sentiment_payload: dict[str, Any], config: ImageAnalysisConfig) -> str:
@@ -176,6 +127,7 @@ def analyze_image_news(
     filename: str,
     config: ImageAnalysisConfig,
     question: str | None = None,
+    sentiment_config: SentimentConfig | None = None,
 ) -> dict[str, Any]:
     if not image_bytes:
         raise ValueError("Image file is empty")
@@ -187,7 +139,9 @@ def analyze_image_news(
     if not extracted_text:
         raise RuntimeError("No text could be extracted from image")
 
-    sentiment_payload = analyze_sentiment(extracted_text, config=SentimentConfig(confidence_floor=0.45))
+    if sentiment_config is None:
+        sentiment_config = SentimentConfig(confidence_floor=0.45)
+    sentiment_payload = analyze_sentiment(extracted_text, config=sentiment_config)
 
     summary = _human_friendly_summary(extracted_text, sentiment_payload, config=config)
 

@@ -38,7 +38,6 @@ def create_app() -> Flask:
     sentiment_config = SentimentConfig(confidence_floor=0.45, dataset_dir=sentiment_dataset_dir, max_vocab=3000)
     image_config = ImageAnalysisConfig(
         ollama_host=os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434"),
-        vision_model=os.getenv("OLLAMA_VISION_MODEL", "llava"),
         text_model=os.getenv("OLLAMA_MODEL", "llama3"),
         timeout_seconds=int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "90")),
     )
@@ -191,6 +190,7 @@ def create_app() -> Flask:
                 filename=uploaded.filename or "uploaded-image",
                 config=image_config,
                 question=question,
+                sentiment_config=sentiment_config,
             )
             return payload, 200
         except ValueError as err:

@@ -39,6 +39,20 @@ POSITIVE_LEXICON: dict[str, float] = {
     "buy": 1.6,
     "green": 1.0,
     "profit": 1.4,
+    "boom": 1.8,
+    "soar": 2.0,
+    "bull": 2.2,
+    "upside": 1.6,
+    "win": 1.5,
+    "excellent": 1.7,
+    "amazing": 1.6,
+    "success": 1.7,
+    "opportunity": 1.5,
+    "bullrun": 2.3,
+    "confidence": 1.4,
+    "breakthrough": 1.8,
+    "record": 1.5,
+    "pump": 1.4,
 }
 
 NEGATIVE_LEXICON: dict[str, float] = {
@@ -62,6 +76,41 @@ NEGATIVE_LEXICON: dict[str, float] = {
     "loss": -1.4,
     "fraud": -2.5,
     "recession": -1.8,
+    "scam": -3.0,
+    "poor": -1.8,
+    "bad": -1.6,
+    "terrible": -2.0,
+    "awful": -2.2,
+    "horrible": -2.3,
+    "doomed": -2.5,
+    "disaster": -2.4,
+    "collapse": -2.6,
+    "fail": -2.1,
+    "failure": -2.2,
+    "risk": -1.3,
+    "risky": -1.5,
+    "danger": -1.7,
+    "dangerous": -1.9,
+    "prison": -2.4,
+    "jail": -2.3,
+    "arrest": -2.2,
+    "indictment": -2.3,
+    "investigation": -1.5,
+    "scandal": -2.2,
+    "ponzi": -3.0,
+    "scheme": -2.4,
+    "suspicious": -1.6,
+    "doubt": -1.4,
+    "concerned": -1.3,
+    "worried": -1.5,
+    "panic": -2.0,
+    "bear": -1.8,
+    "downside": -1.5,
+    "correction": -1.2,
+    "dump": -2.2,
+    "plunge": -2.3,
+    "slump": -1.8,
+    "loss": -1.8,
 }
 
 NEGATIONS = {"not", "never", "no", "none", "hardly", "barely"}
@@ -264,7 +313,7 @@ def _token_score(tokens: list[str]) -> tuple[float, list[dict[str, Any]]]:
     return score, impacts
 
 
-def _label_from_score(score: float, pos_thr: float = 0.15, neg_thr: float = -0.15) -> str:
+def _label_from_score(score: float, pos_thr: float = 0.10, neg_thr: float = -0.10) -> str:
     if score >= pos_thr:
         return "Positive"
     if score <= neg_thr:
@@ -279,20 +328,26 @@ def _lexicon_predict_proba(texts: list[str]) -> np.ndarray:
         raw_score, _ = _token_score(tokens)
         score = float(np.tanh(raw_score / max(len(tokens), 1)))
 
-        if score >= 0.15:
-            p = np.array([0.10, 0.20, 0.70], dtype=float)
-        elif score <= -0.15:
-            p = np.array([0.70, 0.20, 0.10], dtype=float)
+        # More aggressive thresholds for detecting strong signals
+        if score >= 0.20:
+            p = np.array([0.05, 0.15, 0.80], dtype=float)
+        elif score >= 0.10:
+            p = np.array([0.10, 0.25, 0.65], dtype=float)
+        elif score <= -0.25:
+            p = np.array([0.80, 0.15, 0.05], dtype=float)
+        elif score <= -0.10:
+            p = np.array([0.65, 0.25, 0.10], dtype=float)
         else:
             p = np.array([0.22, 0.56, 0.22], dtype=float)
 
+        # Strengthen prediction based on magnitude
         magnitude = min(abs(score), 0.95)
         if score > 0:
-            p[2] += 0.18 * magnitude
-            p[0] -= 0.09 * magnitude
+            p[2] += 0.22 * magnitude
+            p[0] -= 0.11 * magnitude
         elif score < 0:
-            p[0] += 0.18 * magnitude
-            p[2] -= 0.09 * magnitude
+            p[0] += 0.22 * magnitude
+            p[2] -= 0.11 * magnitude
 
         p = np.clip(p, 1e-4, None)
         p = p / np.sum(p)
@@ -440,11 +495,15 @@ def analyze_sentiment(text: str, config: SentimentConfig | None = None) -> dict[
     model_outputs = _single_text_model_outputs(cleaned, bundle)
     best_model = max(model_outputs, key=lambda x: x["validationAccuracy"])
 
-    total_weight = sum(max(m["validationAccuracy"], 1e-6) for m in model_outputs)
-    weighted_score = sum(m["score"] * max(m["validationAccuracy"], 1e-6) for m in model_outputs) / total_weight
+    # Weight all models equally (not by accuracy) for better diversity
+    # Lexicon is good at catching explicit signals, NB at learned patterns, Centroid at semantic similarity
+    weighted_score = sum(m["score"] for m in model_outputs) / len(model_outputs)
 
     label = _label_from_score(weighted_score)
-    confidence = float(max(config.confidence_floor, min(0.99, abs(weighted_score) + 0.42)))
+    # Calculate confidence based on agreement and magnitude
+    score_magnitudes = [abs(m["score"]) for m in model_outputs]
+    agreement_strength = float(np.mean(score_magnitudes))
+    confidence = float(max(config.confidence_floor, min(0.99, agreement_strength + 0.35)))
 
     sentences = _sentence_split(cleaned)
     sentence_rows: list[dict[str, Any]] = []
